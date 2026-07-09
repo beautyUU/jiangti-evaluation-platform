@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { readSheet } from "read-excel-file/browser";
 import {
   calculateScores, defaultJudgePrompt, defaultStudentPrompt, defaultTeacherPrompt,
   dimensions, emptyScores, errorTags, rubricForPrompt,
@@ -11,6 +12,21 @@ const DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const MAX_MESSAGES = 20;
 // 老师在奇数轮发言。第 19 条作为兜底收束，确保不会以学生消息截断答案。
 const FINAL_TEACHER_TURN = 19;
+type ProblemInput = {
+  question: string;
+  answer: string;
+  knowledgePoints: string;
+  solutionAnalysis: string;
+  errorAnalysis: string;
+};
+
+const excelHeaderAliases: Record<keyof ProblemInput, string[]> = {
+  question: ["题目", "题干", "题目文本", "问题"],
+  answer: ["答案", "参考答案", "标准答案"],
+  knowledgePoints: ["知识点", "考点", "涉及知识点"],
+  solutionAnalysis: ["解析", "参考解析", "答案解析", "解题过程", "解法"],
+  errorAnalysis: ["错因分析", "错因", "错误原因", "常见错因"],
+};
 const initialConfig = (prompt: string): ModelConfig => ({
   endpoint: DEFAULT_ENDPOINT, apiKey: "", model: "", prompt,
 });
@@ -113,6 +129,9 @@ export default function Home() {
   const [knowledgePoints, setKnowledgePoints] = useState("");
   const [solutionAnalysis, setSolutionAnalysis] = useState("");
   const [errorAnalysis, setErrorAnalysis] = useState("");
+  const [importedProblems, setImportedProblems] = useState<ProblemInput[]>([]);
+  const [selectedProblemIndex, setSelectedProblemIndex] = useState(-1);
+  const [importMessage, setImportMessage] = useState("");
   const [student, setStudent] = useState(() => initialConfig(defaultStudentPrompt));
   const [teacher, setTeacher] = useState(() => initialConfig(defaultTeacherPrompt));
   const [judge, setJudge] = useState(() => initialConfig(defaultJudgePrompt));
@@ -132,6 +151,7 @@ export default function Home() {
   const stopRef = useRef(false);
   const messagesRef = useRef(messages);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const excelInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, running]);
 
@@ -147,6 +167,75 @@ export default function Home() {
   const validate = (config?: ModelConfig) => {
     if (!question.trim()) throw new Error("请先输入题目。");
     if (config && (!config.endpoint.trim() || !config.model.trim())) throw new Error("请填写对应模型的 API 地址和模型名称。");
+  };
+
+  const problemSetters: Record<keyof ProblemInput, (value: string) => void> = {
+    question: setQuestion,
+    answer: setAnswer,
+    knowledgePoints: setKnowledgePoints,
+    solutionAnalysis: setSolutionAnalysis,
+    errorAnalysis: setErrorAnalysis,
+  };
+
+  const updateProblemField = (field: keyof ProblemInput, value: string) => {
+    problemSetters[field](value);
+    if (selectedProblemIndex >= 0) {
+      setImportedProblems((items) => items.map((item, index) =>
+        index === selectedProblemIndex ? { ...item, [field]: value } : item
+      ));
+    }
+  };
+
+  const loadProblem = (problem: ProblemInput, index: number) => {
+    setSelectedProblemIndex(index);
+    setQuestion(problem.question);
+    setAnswer(problem.answer);
+    setKnowledgePoints(problem.knowledgePoints);
+    setSolutionAnalysis(problem.solutionAnalysis);
+    setErrorAnalysis(problem.errorAnalysis);
+    setMessages([]);
+    messagesRef.current = [];
+    setDialogueFinished(false);
+    setAutoEval(null);
+    setScores(emptyScores());
+    setTags([]);
+    setNotes("");
+  };
+
+  const importExcel = async (file: File) => {
+    setError("");
+    setImportMessage("");
+    try {
+      const rows = await readSheet(file);
+      if (rows.length < 2) throw new Error("表格中没有可导入的数据行。");
+      const headers = rows[0].map((cell) => String(cell ?? "").trim().replace(/\s+/g, ""));
+      const fieldIndexes = Object.fromEntries(
+        Object.entries(excelHeaderAliases).map(([field, aliases]) => [
+          field,
+          headers.findIndex((header) => aliases.includes(header)),
+        ]),
+      ) as Record<keyof ProblemInput, number>;
+      if (Object.values(fieldIndexes).every((index) => index < 0)) {
+        throw new Error("没有识别到题目字段。请使用列名：题目、答案、知识点、解析、错因分析。");
+      }
+      const valueAt = (row: readonly unknown[], index: number) =>
+        index < 0 || row[index] === null || row[index] === undefined ? "" : String(row[index]).trim();
+      const problems = rows.slice(1).map((row) => ({
+        question: valueAt(row, fieldIndexes.question),
+        answer: valueAt(row, fieldIndexes.answer),
+        knowledgePoints: valueAt(row, fieldIndexes.knowledgePoints),
+        solutionAnalysis: valueAt(row, fieldIndexes.solutionAnalysis),
+        errorAnalysis: valueAt(row, fieldIndexes.errorAnalysis),
+      })).filter((problem) => Object.values(problem).some(Boolean));
+      if (!problems.length) throw new Error("表格中没有非空的题目数据。");
+      setImportedProblems(problems);
+      loadProblem(problems[0], 0);
+      setImportMessage(`已导入 ${problems.length} 道题，当前显示第 1 题。`);
+    } catch (e) {
+      setError(e instanceof Error ? `Excel 导入失败：${e.message}` : "Excel 导入失败。");
+    } finally {
+      if (excelInputRef.current) excelInputRef.current.value = "";
+    }
   };
 
   const historyFor = (role: "teacher" | "student", history: DialogueMessage[]) =>
@@ -348,22 +437,45 @@ export default function Home() {
       <div className="workspace">
         <aside className="left-panel">
           <div className="panel-heading"><div><small>01 / CONFIGURE</small><h2>题目与模型</h2></div><span className="step-pill">配置</span></div>
+          <div className="input-source-bar">
+            <div><b>题目输入</b><small>在线填写或批量导入</small></div>
+            <input ref={excelInputRef} className="file-input" type="file" accept=".xlsx"
+              onChange={(e) => e.target.files?.[0] && importExcel(e.target.files[0])} />
+            <button onClick={() => excelInputRef.current?.click()}>↑ 上传 Excel</button>
+          </div>
+          <p className="excel-hint">首行列名：题目、答案、知识点、解析、错因分析；允许部分单元格为空。</p>
+          {importedProblems.length > 0 && (
+            <label className="problem-selector">已导入题目
+              <select value={selectedProblemIndex} onChange={(e) => {
+                const index = Number(e.target.value);
+                loadProblem(importedProblems[index], index);
+                setImportMessage(`已切换到第 ${index + 1} 题。`);
+              }}>
+                {importedProblems.map((problem, index) => (
+                  <option key={index} value={index}>
+                    {index + 1}. {problem.question || "题目待补充"}
+                  </option>
+                ))}
+              </select>
+              {importMessage && <span>{importMessage}</span>}
+            </label>
+          )}
           <label className="question-box">题目文本
-            <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={4} placeholder="在这里输入一道小学数学题…" />
+            <textarea value={question} onChange={(e) => updateProblemField("question", e.target.value)} rows={4} placeholder="在这里输入一道小学数学题…" />
             <span>{question.length} 字</span>
           </label>
           <div className="problem-extras">
             <label>参考答案
-              <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} rows={2} placeholder="可选，例如：4 颗" />
+              <textarea value={answer} onChange={(e) => updateProblemField("answer", e.target.value)} rows={2} placeholder="可选，例如：4 颗" />
             </label>
             <label>知识点
-              <input value={knowledgePoints} onChange={(e) => setKnowledgePoints(e.target.value)} placeholder="可选，例如：平均分、表内除法" />
+              <input value={knowledgePoints} onChange={(e) => updateProblemField("knowledgePoints", e.target.value)} placeholder="可选，例如：平均分、表内除法" />
             </label>
             <label>参考解析
-              <textarea value={solutionAnalysis} onChange={(e) => setSolutionAnalysis(e.target.value)} rows={3} placeholder="可选，填写标准解题过程" />
+              <textarea value={solutionAnalysis} onChange={(e) => updateProblemField("solutionAnalysis", e.target.value)} rows={3} placeholder="可选，填写标准解题过程" />
             </label>
             <label>错因分析
-              <textarea value={errorAnalysis} onChange={(e) => setErrorAnalysis(e.target.value)} rows={3} placeholder="可选，填写常见错误及其原因" />
+              <textarea value={errorAnalysis} onChange={(e) => updateProblemField("errorAnalysis", e.target.value)} rows={3} placeholder="可选，填写常见错误及其原因" />
             </label>
           </div>
           <ModelCard title="学生模型" icon="生" accent="#7c8ce0" value={student} onChange={setStudent} />

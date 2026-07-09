@@ -37,6 +37,17 @@ textarea { resize: vertical; }
 .panel-heading small { font-size: 9px; letter-spacing: .18em; color: #9a9dad; font-weight: 700; }
 .panel-heading h2 { margin: 4px 0 0; font-size: 19px; letter-spacing: -.03em; }
 .step-pill { font-size: 10px; background: var(--indigo-soft); color: var(--indigo); border-radius: 20px; padding: 5px 9px; }
+.input-source-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+.input-source-bar > div { display: flex; flex-direction: column; gap: 2px; }
+.input-source-bar b { font-size: 12px; }
+.input-source-bar small { font-size: 9px; color: #a0a3b1; }
+.input-source-bar button { border: 1px solid #d9ddf2; color: #596bc8; background: #f2f4ff; border-radius: 8px; padding: 7px 10px; font-size: 10px; font-weight: 600; }
+.input-source-bar button:hover { background: #e9ecfd; }
+.file-input { display: none; }
+.excel-hint { margin: 0 0 11px; padding: 7px 9px; border-radius: 7px; background: #f8f8fb; color: #9497a7; font-size: 8px; line-height: 1.5; }
+.problem-selector { margin-bottom: 11px; }
+.problem-selector select { width: 100%; border: 1px solid #dfe1e9; border-radius: 8px; padding: 9px 30px 9px 10px; background: white; color: #4f5367; font-size: 11px; outline: none; }
+.problem-selector span { color: #4c947d; font-size: 9px; font-weight: 400; }
 
 label { display: flex; flex-direction: column; gap: 7px; color: #626678; font-size: 11px; font-weight: 600; }
 input, textarea { border: 1px solid #e2e3ea; border-radius: 8px; padding: 10px 11px; background: #fbfbfd; color: var(--ink); outline: none; line-height: 1.55; font-size: 12px; transition: .2s; }
