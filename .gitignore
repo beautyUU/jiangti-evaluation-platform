@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# local files
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+
+# editors
+.idea/
+.vscode/
+
+# TypeScript
+*.tsbuildinfo
+
+# unrelated local workspace files
+feishu_auth_qr.png
+豆包整卷OCR结构化输出字段定义.md
