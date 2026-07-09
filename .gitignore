@@ -22,3 +22,6 @@ out/
 # unrelated local workspace files
 feishu_auth_qr.png
 豆包整卷OCR结构化输出字段定义.md
+
+# Local Netlify folder
+.netlify
