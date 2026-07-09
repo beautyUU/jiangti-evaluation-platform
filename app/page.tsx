@@ -334,7 +334,7 @@ export default function Home() {
   return (
     <main>
       <header className="topbar">
-        <div className="brand"><span className="brand-mark">数</span><div><b>数芽</b><small>双模型讲题评测</small></div></div>
+        <div className="brand"><span className="brand-mark">评</span><div><b>讲题评测平台</b><small>双模型小学数学讲题评测</small></div></div>
         <div className="session-chip"><span /> SESSION <b>{sessionId.slice(0, 8).toUpperCase()}</b></div>
         <div className="header-actions">
           <button className="ghost" onClick={reset}>↻ 重置</button>

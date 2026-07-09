@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "数芽｜双模型讲题评测",
+  title: "讲题评测平台",
   description: "小学数学 AI 讲题双模型对话评测平台",
 };
 
