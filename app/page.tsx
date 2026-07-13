@@ -102,7 +102,7 @@ async function callModel(config: ModelConfig, messages: Array<{ role: "system" |
     }),
   });
   const raw = await response.text();
-  let data: { content?: string; error?: string; raw?: string };
+  let data: { content?: string; error?: string; raw?: string; details?: string; upstreamStatus?: number; upstreamRaw?: string };
   try {
     data = JSON.parse(raw);
   } catch {
@@ -111,8 +111,21 @@ async function callModel(config: ModelConfig, messages: Array<{ role: "system" |
       ? "接口返回了网页内容，不是模型 JSON 响应。请检查 API 地址是否被登录页、网关页、反向代理或部署平台重定向。"
       : `接口返回了非 JSON 内容：${raw.slice(0, 160)}`);
   }
-  if (!response.ok) throw new Error(data.error || "模型调用失败");
-  return stripThinking(data.content ?? "");
+  if (!response.ok) {
+    const parts = [
+      data.error || "模型调用失败",
+      `前端请求状态：HTTP ${response.status}`,
+      data.upstreamStatus ? `模型接口状态：HTTP ${data.upstreamStatus}` : "",
+      data.details ? `错误详情：${data.details}` : "",
+      data.raw ? `接口返回摘要：${data.raw.slice(0, 300)}` : "",
+      data.upstreamRaw ? `模型原始返回：${data.upstreamRaw.slice(0, 300)}` : "",
+    ].filter(Boolean);
+    throw new Error(parts.join("\n"));
+  }
+  if (!data.content) {
+    throw new Error(`模型接口响应成功，但没有返回可展示内容。\n接口返回摘要：${raw.slice(0, 300)}`);
+  }
+  return stripThinking(data.content);
 }
 
 function ModelCard({ title, icon, accent, value, onChange }: {

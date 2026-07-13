@@ -10,6 +10,21 @@ type ChatBody = {
   temperature?: number;
 };
 
+function summarizeRaw(raw: string) {
+  return raw.length > 1200 ? `${raw.slice(0, 1200)}...` : raw;
+}
+
+function stringifyErrorValue(value: unknown) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const message = record.message ?? record.msg ?? record.code ?? record.type;
+    if (message) return String(message);
+    return JSON.stringify(value);
+  }
+  return value ? String(value) : "";
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as ChatBody;
@@ -50,29 +65,43 @@ export async function POST(request: NextRequest) {
       data = JSON.parse(raw);
     } catch {
       return NextResponse.json(
-        { error: `上游 API 返回了非 JSON 内容（HTTP ${upstream.status}）。`, raw },
+        {
+          error: `上游 API 返回了非 JSON 内容（HTTP ${upstream.status}）。`,
+          details: "这通常表示 API 地址被网关、登录页、反向代理或平台错误页拦截了。",
+          upstreamStatus: upstream.status,
+          upstreamRaw: summarizeRaw(raw),
+        },
         { status: 502 },
       );
     }
 
     if (!upstream.ok) {
-      const upstreamError =
-        typeof data === "object" && data && "error" in data
-          ? (data as { error: unknown }).error
-          : null;
-      const message =
-        typeof upstreamError === "object" && upstreamError && "message" in upstreamError
-          ? String((upstreamError as { message: unknown }).message)
-          : upstreamError
-            ? JSON.stringify(upstreamError)
-            : raw;
-      return NextResponse.json({ error: `模型 API 调用失败（HTTP ${upstream.status}）：${message}` }, { status: 502 });
+      const record = typeof data === "object" && data ? data as Record<string, unknown> : {};
+      const upstreamError = record.error ?? record.message ?? record.msg ?? record;
+      const message = stringifyErrorValue(upstreamError) || raw;
+      return NextResponse.json(
+        {
+          error: `模型 API 调用失败（HTTP ${upstream.status}）：${message}`,
+          details: JSON.stringify(data),
+          upstreamStatus: upstream.status,
+          upstreamRaw: summarizeRaw(raw),
+        },
+        { status: 502 },
+      );
     }
 
     const content = (data as { choices?: Array<{ message?: { content?: string } }> })
       ?.choices?.[0]?.message?.content;
     if (!content) {
-      return NextResponse.json({ error: "模型 API 响应中没有 choices[0].message.content。", raw }, { status: 502 });
+      return NextResponse.json(
+        {
+          error: "模型 API 响应中没有 choices[0].message.content。",
+          details: "这通常表示该接入点返回格式不是 OpenAI-compatible chat/completions。",
+          upstreamStatus: upstream.status,
+          upstreamRaw: summarizeRaw(raw),
+        },
+        { status: 502 },
+      );
     }
     return NextResponse.json({ content, usage: (data as { usage?: unknown }).usage ?? null });
   } catch (error) {

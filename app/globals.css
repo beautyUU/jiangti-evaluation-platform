@@ -24,8 +24,9 @@ textarea { resize: vertical; }
 .header-actions button { border-radius: 9px; padding: 9px 12px; border: 1px solid var(--line); background: white; color: #595d70; white-space: nowrap; }
 .header-actions .export { background: #25283a; color: white; border-color: #25283a; }
 .header-actions .icon-btn { font-size: 10px; font-weight: 700; padding: 9px; }
-.toast { position: fixed; z-index: 30; top: 78px; left: 50%; transform: translateX(-50%); min-width: 320px; max-width: 640px; padding: 11px 14px; border: 1px solid #bce5d4; background: #f0fbf6; color: #357861; border-radius: 10px; box-shadow: 0 8px 30px #2222; display: flex; gap: 9px; align-items: center; }
+.toast { position: fixed; z-index: 30; top: 78px; left: 50%; transform: translateX(-50%); min-width: 320px; max-width: min(760px, calc(100vw - 24px)); padding: 11px 14px; border: 1px solid #bce5d4; background: #f0fbf6; color: #357861; border-radius: 10px; box-shadow: 0 8px 30px #2222; display: flex; gap: 9px; align-items: flex-start; white-space: pre-wrap; line-height: 1.55; max-height: 42vh; overflow: auto; }
 .toast.error { border-color: #f2c6c6; background: #fff4f4; color: #a24e4e; }
+.toast > span { flex: 0 0 auto; }
 .toast button { margin-left: auto; border: 0; background: none; color: inherit; font-size: 18px; }
 
 .workspace { height: calc(100vh - 68px); display: grid; grid-template-columns: minmax(300px, 23%) minmax(430px, 1fr) minmax(390px, 31%); }
