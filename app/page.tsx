@@ -92,13 +92,19 @@ function isStudentDone(text: string) {
   return /我懂了|明白了|会了|听懂了|原来如此|懂啦/.test(text) && !/不懂|没懂|不会|还是/.test(text);
 }
 
-async function callModel(config: ModelConfig, messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, lowTemperature = false) {
+async function callModel(
+  config: ModelConfig,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  lowTemperature = false,
+  maxTokens?: number,
+) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       endpoint: normalizeEndpoint(config.endpoint), apiKey: config.apiKey,
       model: config.model, messages, temperature: lowTemperature ? 0.2 : 0.7,
+      maxTokens,
     }),
   });
   const raw = await response.text();
@@ -107,9 +113,15 @@ async function callModel(config: ModelConfig, messages: Array<{ role: "system" |
     data = JSON.parse(raw);
   } catch {
     const looksLikeHtml = /^\s*</.test(raw);
+    const summary = raw.replace(/\s+/g, " ").slice(0, 500);
     throw new Error(looksLikeHtml
-      ? "接口返回了网页内容，不是模型 JSON 响应。请检查 API 地址是否被登录页、网关页、反向代理或部署平台重定向。"
-      : `接口返回了非 JSON 内容：${raw.slice(0, 160)}`);
+      ? [
+        "接口返回了网页内容，不是模型 JSON 响应。",
+        `前端请求状态：HTTP ${response.status}`,
+        "如果只在自动打分时出现，通常是 Judge 请求过长或模型响应过慢，被部署平台/网关返回了 HTML 错误页。",
+        `网页摘要：${summary}`,
+      ].join("\n")
+      : `接口返回了非 JSON 内容（HTTP ${response.status}）：${summary}`);
   }
   if (!response.ok) {
     const parts = [
@@ -391,6 +403,15 @@ export default function Home() {
       validate(judge);
       if (!messages.length) throw new Error("请先完成至少一轮师生对话。");
       const requiredScoreKeys = dimensions.flatMap((dimension) => dimension.criteria.map((criterion) => criterion.id));
+      const compactRubric = dimensions.map((dimension) => ({
+        id: dimension.id,
+        name: dimension.name,
+        weight: dimension.weight,
+        criteria: dimension.criteria.map((criterion) => ({
+          id: criterion.id,
+          name: criterion.name,
+        })),
+      }));
       const outputTemplate = {
         scores: Object.fromEntries(requiredScoreKeys.map((key) => [key, 0])),
         errorTags: [],
@@ -399,12 +420,6 @@ export default function Home() {
         summary: "用一到两句话总结本轮讲题质量",
       };
       const payload = {
-        inputDescription: {
-          problem: "待评测的小学数学题及可选参考信息。answer/knowledgePoints/solutionAnalysis/errorAnalysis 可能为空；为空时请主要根据题目和对话判断。",
-          dialogue: "按时间顺序排列的师生对话。role=teacher 表示 AI 老师，role=student 表示学生模型。",
-          rubric: "评分标准。每个 criteria.id 都必须出现在输出 scores 中。",
-          outputContract: "你的输出必须严格匹配此协议，只输出 JSON 对象，不要输出任何额外文本。",
-        },
         problem: {
           question,
           answer,
@@ -412,25 +427,22 @@ export default function Home() {
           solutionAnalysis,
           errorAnalysis,
         },
-        dialogue: messages.map((m) => ({ turn: m.turn, role: m.role, content: m.content })),
-        rubric: rubricForPrompt,
+        dialogue: messages.map((m) => ({
+          turn: m.turn,
+          role: m.role === "teacher" ? "AI老师" : "学生",
+          content: m.content,
+        })),
+        rubric: compactRubric,
         outputContract: {
           requiredScoreKeys,
           allowedErrorTags: errorTags,
-          fieldTypes: {
-            scores: "对象。key 必须完整等于 requiredScoreKeys；value 必须是 0、1、2、3、4、5 中的整数。",
-            errorTags: "字符串数组。只能从 allowedErrorTags 中选择；没有错误标签则返回 []。",
-            deductions: "字符串数组。列出主要扣分原因；没有明显扣分也返回 []。",
-            suggestions: "字符串数组。列出改进建议；没有建议也返回 []。",
-            summary: "字符串。总体评价。",
-          },
           outputTemplate,
         },
       };
       const raw = await callModel(judge, [
-        { role: "system", content: judge.prompt },
+        { role: "system", content: `${judge.prompt}\n\n请快速完成评分，输出必须简短。deductions 和 suggestions 各最多 5 条，每条不超过 40 个汉字。` },
         { role: "user", content: JSON.stringify(payload, null, 2) },
-      ], true);
+      ], true, 1200);
       try {
         const parsed = JSON.parse(cleanJson(raw)) as Partial<AutoEvaluation>;
         const parsedScores = emptyScores();

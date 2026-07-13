@@ -8,6 +8,7 @@ type ChatBody = {
   model?: string;
   messages?: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
+  maxTokens?: number;
 };
 
 function summarizeRaw(raw: string) {
@@ -55,6 +56,7 @@ export async function POST(request: NextRequest) {
         model: body.model.trim(),
         messages: body.messages,
         temperature: body.temperature ?? 0.7,
+        ...(typeof body.maxTokens === "number" ? { max_tokens: body.maxTokens } : {}),
       }),
       signal: AbortSignal.timeout(90_000),
     });
