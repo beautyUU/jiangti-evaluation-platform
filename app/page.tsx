@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { readSheet } from "read-excel-file/browser";
+import * as XLSX from "xlsx";
 import {
   calculateScores, defaultJudgePrompt, defaultStudentPrompt, defaultTeacherPrompt,
   dimensions, emptyScores, errorTags, rubricForPrompt,
@@ -18,6 +19,34 @@ type ProblemInput = {
   knowledgePoints: string;
   solutionAnalysis: string;
   errorAnalysis: string;
+};
+
+type EvaluationExportState = {
+  session: { id: string; createdAt: string; exportedAt: string; version: string };
+  problem: ProblemInput;
+  configurations: {
+    student: ModelConfig;
+    teacher: ModelConfig;
+    judge: ModelConfig;
+  };
+  dialogue: {
+    maxMessages: number;
+    completed: boolean;
+    messages: DialogueMessage[];
+  };
+  manualEvaluation: ReturnType<typeof calculateScores> & {
+    scores: Record<string, number | null>;
+    errorTags: string[];
+    notes: string;
+  };
+  autoEvaluation: AutoEvaluation | null;
+};
+
+type ExperimentSnapshot = {
+  id: string;
+  savedAt: string;
+  title: string;
+  state: EvaluationExportState;
 };
 
 const excelHeaderAliases: Record<keyof ProblemInput, string[]> = {
@@ -60,7 +89,16 @@ async function callModel(config: ModelConfig, messages: Array<{ role: "system" |
       ...(json ? { responseFormat: "json" } : {}),
     }),
   });
-  const data = await response.json();
+  const raw = await response.text();
+  let data: { content?: string; error?: string; raw?: string };
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    const looksLikeHtml = /^\s*</.test(raw);
+    throw new Error(looksLikeHtml
+      ? "接口返回了网页内容，不是模型 JSON 响应。请检查 API 地址是否被登录页、网关页、反向代理或部署平台重定向。"
+      : `接口返回了非 JSON 内容：${raw.slice(0, 160)}`);
+  }
   if (!response.ok) throw new Error(data.error || "模型调用失败");
   return data.content as string;
 }
@@ -89,15 +127,17 @@ function ModelCard({ title, icon, accent, value, onChange }: {
   );
 }
 
-function ScorePanel({ scores, onScore }: {
+function ScorePanel({ scores, onScore, readOnly = false, openAll = false }: {
   scores: Record<string, number | null>;
-  onScore: (id: string, score: number) => void;
+  onScore?: (id: string, score: number) => void;
+  readOnly?: boolean;
+  openAll?: boolean;
 }) {
   const calc = calculateScores(scores);
   return (
     <div className="score-stack">
       {dimensions.map((dimension, index) => (
-        <details className="dimension" key={dimension.id} open={index === 0}>
+        <details className="dimension" key={dimension.id} open={openAll || index === 0}>
           <summary>
             <span className="dimension-mark" style={{ background: dimension.color }}>{index + 1}</span>
             <span className="dimension-name">{dimension.name}<small>{dimension.weight} 分</small></span>
@@ -111,7 +151,8 @@ function ScorePanel({ scores, onScore }: {
                 <div className="score-buttons" aria-label={`${criterion.name}评分`}>
                   {[0, 1, 2, 3, 4, 5].map((value) => (
                     <button key={value} className={scores[criterion.id] === value ? "selected" : ""}
-                      onClick={() => onScore(criterion.id, value)} title={`${value} 分`}>{value}</button>
+                      disabled={readOnly}
+                      onClick={() => onScore?.(criterion.id, value)} title={`${value} 分`}>{value}</button>
                   ))}
                 </div>
               </div>
@@ -148,6 +189,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<"manual" | "auto">("manual");
   const [sessionId, setSessionId] = useState(uid);
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
+  const [experiments, setExperiments] = useState<ExperimentSnapshot[]>([]);
   const stopRef = useRef(false);
   const messagesRef = useRef(messages);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -377,13 +419,18 @@ export default function Home() {
     setNotice("已将自动评分填入人工评分区，你仍可逐项调整。");
   };
 
-  const exportState = () => ({
-    session: { id: sessionId, createdAt, exportedAt: new Date().toISOString(), version: "1.0" },
+  const redactedConfig = (config: ModelConfig): ModelConfig => ({
+    ...config,
+    apiKey: config.apiKey ? "[REDACTED]" : "",
+  });
+
+  const exportState = (exportedAt = new Date().toISOString()): EvaluationExportState => ({
+    session: { id: sessionId, createdAt, exportedAt, version: "1.1" },
     problem: { question, answer, knowledgePoints, solutionAnalysis, errorAnalysis },
     configurations: {
-      student: { ...student, apiKey: student.apiKey ? "[REDACTED]" : "" },
-      teacher: { ...teacher, apiKey: teacher.apiKey ? "[REDACTED]" : "" },
-      judge: { ...judge, apiKey: judge.apiKey ? "[REDACTED]" : "" },
+      student: redactedConfig(student),
+      teacher: redactedConfig(teacher),
+      judge: redactedConfig(judge),
     },
     dialogue: {
       maxMessages: MAX_MESSAGES,
@@ -393,6 +440,19 @@ export default function Home() {
     manualEvaluation: { scores, ...manualCalc, errorTags: tags, notes },
     autoEvaluation: autoEval,
   });
+
+  const saveExperiment = () => {
+    const savedAt = new Date().toISOString();
+    const state = exportState(savedAt);
+    const snapshot: ExperimentSnapshot = {
+      id: state.session.id,
+      savedAt,
+      title: question.trim().slice(0, 26) || "未命名题目",
+      state,
+    };
+    setExperiments((prev) => [...prev, snapshot]);
+    setNotice(`已保存第 ${experiments.length + 1} 次实验，可继续换题或重跑。`);
+  };
 
   const download = (content: string, type: string, extension: string) => {
     const blob = new Blob(["\ufeff", content], { type });
@@ -420,6 +480,118 @@ export default function Home() {
     download(escaped, "text/csv;charset=utf-8", "csv");
   };
 
+  const exportExperimentsExcel = () => {
+    const now = new Date().toISOString();
+    const snapshots = experiments.length
+      ? experiments
+      : [{
+        id: sessionId,
+        savedAt: now,
+        title: question.trim().slice(0, 26) || "当前实验",
+        state: exportState(now),
+      }];
+    const workbook = XLSX.utils.book_new();
+    const summaryRows: Array<Array<string | number>> = [[
+      "实验序号", "Session ID", "保存时间", "题目", "答案", "知识点", "对话条数",
+      "对话是否完成", "人工总分", "人工是否通过", "自动总分", "自动是否通过", "错误标签", "人工备注",
+    ]];
+    const scoreRows: Array<Array<string | number>> = [[
+      "实验序号", "Session ID", "评分来源", "一级维度", "一级权重", "一级小计",
+      "二级维度 ID", "二级维度", "二级分数",
+    ]];
+    const dialogueRows: Array<Array<string | number>> = [[
+      "实验序号", "Session ID", "轮次", "角色", "模型", "API 地址", "时间", "消息内容", "Prompt 快照",
+    ]];
+    const detailRows: Array<Array<string | number>> = [[
+      "实验序号", "Session ID", "类型", "字段", "内容",
+    ]];
+
+    snapshots.forEach((snapshot, index) => {
+      const state = snapshot.state;
+      summaryRows.push([
+        index + 1,
+        state.session.id,
+        snapshot.savedAt,
+        state.problem.question,
+        state.problem.answer,
+        state.problem.knowledgePoints,
+        state.dialogue.messages.length,
+        state.dialogue.completed ? "是" : "否",
+        state.manualEvaluation.total,
+        state.manualEvaluation.passed ? "是" : "否",
+        state.autoEvaluation?.parseError ? "解析失败" : state.autoEvaluation?.total ?? "",
+        state.autoEvaluation?.parseError ? "否" : state.autoEvaluation?.passed ? "是" : state.autoEvaluation ? "否" : "",
+        state.manualEvaluation.errorTags.join("；"),
+        state.manualEvaluation.notes,
+      ]);
+
+      const pushScores = (source: "人工评分" | "自动评分", scores: Record<string, number | null>, subtotals: Record<string, number>) => {
+        dimensions.forEach((dimension) => {
+          dimension.criteria.forEach((criterion) => {
+            const value = scores[criterion.id];
+            scoreRows.push([
+              index + 1,
+              state.session.id,
+              source,
+              dimension.name,
+              dimension.weight,
+              subtotals[dimension.id] ?? "",
+              criterion.id,
+              criterion.name,
+              value === null || value === undefined ? "" : value,
+            ]);
+          });
+        });
+      };
+      pushScores("人工评分", state.manualEvaluation.scores, state.manualEvaluation.subtotals);
+      if (state.autoEvaluation && !state.autoEvaluation.parseError) {
+        pushScores("自动评分", state.autoEvaluation.scores, state.autoEvaluation.subtotals);
+      }
+
+      state.dialogue.messages.forEach((message) => {
+        dialogueRows.push([
+          index + 1,
+          state.session.id,
+          message.turn,
+          message.role === "teacher" ? "AI 老师" : "学生",
+          message.model,
+          message.modelApi,
+          message.timestamp,
+          message.content,
+          message.promptSnapshot,
+        ]);
+      });
+
+      detailRows.push(
+        [index + 1, state.session.id, "题目", "解析", state.problem.solutionAnalysis],
+        [index + 1, state.session.id, "题目", "错因分析", state.problem.errorAnalysis],
+        [index + 1, state.session.id, "配置", "学生模型", JSON.stringify(state.configurations.student)],
+        [index + 1, state.session.id, "配置", "AI 老师模型", JSON.stringify(state.configurations.teacher)],
+        [index + 1, state.session.id, "配置", "Judge 模型", JSON.stringify(state.configurations.judge)],
+        [index + 1, state.session.id, "自动评分", "错误标签", state.autoEvaluation?.errorTags.join("；") ?? ""],
+        [index + 1, state.session.id, "自动评分", "扣分原因", state.autoEvaluation?.deductions.join("\n") ?? ""],
+        [index + 1, state.session.id, "自动评分", "改进建议", state.autoEvaluation?.suggestions.join("\n") ?? ""],
+        [index + 1, state.session.id, "自动评分", "总结", state.autoEvaluation?.summary ?? ""],
+        [index + 1, state.session.id, "自动评分", "原始输出", state.autoEvaluation?.rawOutput ?? ""],
+        [index + 1, state.session.id, "自动评分", "解析错误", state.autoEvaluation?.parseError ?? ""],
+      );
+    });
+
+    const appendSheet = (name: string, rows: Array<Array<string | number>>) => {
+      const sheet = XLSX.utils.aoa_to_sheet(rows);
+      sheet["!cols"] = rows[0].map((_, columnIndex) => ({
+        wch: Math.min(60, Math.max(10, ...rows.slice(0, 80).map((row) => String(row[columnIndex] ?? "").length + 2))),
+      }));
+      XLSX.utils.book_append_sheet(workbook, sheet, name);
+    };
+    appendSheet("实验汇总", summaryRows);
+    appendSheet("二级评分明细", scoreRows);
+    appendSheet("对话记录", dialogueRows);
+    appendSheet("配置与原始输出", detailRows);
+    XLSX.writeFile(workbook, `math-evaluation-experiments-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    if (!experiments.length) setNotice("还没有保存实验，已先导出当前这一轮。");
+  };
+
   return (
     <main>
       <header className="topbar">
@@ -427,7 +599,9 @@ export default function Home() {
         <div className="session-chip"><span /> SESSION <b>{sessionId.slice(0, 8).toUpperCase()}</b></div>
         <div className="header-actions">
           <button className="ghost" onClick={reset}>↻ 重置</button>
-          <button className="export" onClick={exportJson}>⇩ 导出 JSON</button>
+          <button className="ghost" onClick={saveExperiment}>＋ 保存本次实验</button>
+          <button className="export" onClick={exportExperimentsExcel}>⇩ 导出全部 Excel{experiments.length ? `（${experiments.length}）` : ""}</button>
+          <button className="icon-btn" onClick={exportJson} title="导出当前 JSON">JSON</button>
           <button className="icon-btn" onClick={exportCsv} title="导出 CSV">CSV</button>
         </div>
       </header>
@@ -535,6 +709,10 @@ export default function Home() {
             <button className={activeTab === "manual" ? "active" : ""} onClick={() => setActiveTab("manual")}>人工评分</button>
             <button className={activeTab === "auto" ? "active" : ""} onClick={() => setActiveTab("auto")}>自动评分 {autoEval && <i />}</button>
           </div>
+          <div className="experiment-strip">
+            <span>已保存实验 <b>{experiments.length}</b> 次</span>
+            <button onClick={saveExperiment}>保存当前</button>
+          </div>
 
           <div className="score-scroll">
             {activeTab === "manual" ? (
@@ -555,9 +733,18 @@ export default function Home() {
                   <div className="parse-error"><h3>JSON 解析失败</h3><p>{autoEval.parseError}</p><label>模型原始输出<textarea readOnly rows={12} value={autoEval.rawOutput} /></label></div>
                 ) : (
                   <>
+                    <div className="score-guide"><span>0 异常</span><span>1–2 严重</span><span>3 普通</span><span>4 较好</span><span>5 优秀</span></div>
                     <div className="auto-summary"><span>参考总分</span><b>{autoEval.total}<small> / 100</small></b><em className={autoEval.passed ? "pass" : "fail"}>{autoEval.passed ? "达到基线" : "未达 80 分基线"}</em></div>
                     {autoEval.summary && <p className="judge-summary">{autoEval.summary}</p>}
-                    <ScorePanel scores={autoEval.scores} onScore={() => {}} />
+                    <ScorePanel scores={autoEval.scores} readOnly openAll />
+                    <section className="feedback-section auto-tags">
+                      <h3>错误标签 <small>Judge 参考</small></h3>
+                      <div className="tags">
+                        {(autoEval.errorTags.length ? autoEval.errorTags : ["暂无错误标签"]).map((tag) => (
+                          <button key={tag} className={autoEval.errorTags.includes(tag) ? "selected" : ""} disabled>{tag}</button>
+                        ))}
+                      </div>
+                    </section>
                     <section className="judge-list"><h3>扣分原因</h3>{autoEval.deductions.map((x, i) => <p key={i}>− {x}</p>)}</section>
                     <section className="judge-list suggestion"><h3>改进建议</h3>{autoEval.suggestions.map((x, i) => <p key={i}>→ {x}</p>)}</section>
                     <button className="apply-btn" onClick={applyAuto}>将参考分填入人工评分</button>

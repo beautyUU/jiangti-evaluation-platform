@@ -13,7 +13,8 @@
     "postcss": "^8.5.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "read-excel-file": "^9.2.0"
+    "read-excel-file": "^9.2.0",
+    "xlsx": "^0.18.5"
   },
   "overrides": {
     "postcss": "^8.5.10"
