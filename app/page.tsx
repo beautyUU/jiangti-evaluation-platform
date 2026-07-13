@@ -377,7 +377,21 @@ export default function Home() {
     try {
       validate(judge);
       if (!messages.length) throw new Error("请先完成至少一轮师生对话。");
+      const requiredScoreKeys = dimensions.flatMap((dimension) => dimension.criteria.map((criterion) => criterion.id));
+      const outputTemplate = {
+        scores: Object.fromEntries(requiredScoreKeys.map((key) => [key, 0])),
+        errorTags: [],
+        deductions: ["用一句话说明具体扣分原因"],
+        suggestions: ["用一句话说明可执行的改进建议"],
+        summary: "用一到两句话总结本轮讲题质量",
+      };
       const payload = {
+        inputDescription: {
+          problem: "待评测的小学数学题及可选参考信息。answer/knowledgePoints/solutionAnalysis/errorAnalysis 可能为空；为空时请主要根据题目和对话判断。",
+          dialogue: "按时间顺序排列的师生对话。role=teacher 表示 AI 老师，role=student 表示学生模型。",
+          rubric: "评分标准。每个 criteria.id 都必须出现在输出 scores 中。",
+          outputContract: "你的输出必须严格匹配此协议，只输出 JSON 对象，不要输出任何额外文本。",
+        },
         problem: {
           question,
           answer,
@@ -387,10 +401,17 @@ export default function Home() {
         },
         dialogue: messages.map((m) => ({ turn: m.turn, role: m.role, content: m.content })),
         rubric: rubricForPrompt,
-        requiredOutput: {
-          scores: "所有 criterion id 对应 0-5 整数",
-          errorTags: errorTags,
-          deductions: ["具体扣分原因"], suggestions: ["具体改进建议"], summary: "总体评价",
+        outputContract: {
+          requiredScoreKeys,
+          allowedErrorTags: errorTags,
+          fieldTypes: {
+            scores: "对象。key 必须完整等于 requiredScoreKeys；value 必须是 0、1、2、3、4、5 中的整数。",
+            errorTags: "字符串数组。只能从 allowedErrorTags 中选择；没有错误标签则返回 []。",
+            deductions: "字符串数组。列出主要扣分原因；没有明显扣分也返回 []。",
+            suggestions: "字符串数组。列出改进建议；没有建议也返回 []。",
+            summary: "字符串。总体评价。",
+          },
+          outputTemplate,
         },
       };
       const raw = await callModel(judge, [
