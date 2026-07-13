@@ -8,7 +8,6 @@ type ChatBody = {
   model?: string;
   messages?: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
-  responseFormat?: "json";
 };
 
 export async function POST(request: NextRequest) {
@@ -41,7 +40,6 @@ export async function POST(request: NextRequest) {
         model: body.model.trim(),
         messages: body.messages,
         temperature: body.temperature ?? 0.7,
-        ...(body.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
       }),
       signal: AbortSignal.timeout(90_000),
     });

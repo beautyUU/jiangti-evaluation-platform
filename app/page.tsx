@@ -72,21 +72,33 @@ function normalizeEndpoint(value: string) {
 }
 
 function cleanJson(raw: string) {
-  return raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const cleaned = stripThinking(raw).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const firstObject = cleaned.indexOf("{");
+  const lastObject = cleaned.lastIndexOf("}");
+  if (firstObject >= 0 && lastObject > firstObject) return cleaned.slice(firstObject, lastObject + 1);
+  return cleaned;
+}
+
+function stripThinking(raw: string) {
+  return raw
+    .replace(/<think[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<reasoning[\s\S]*?<\/reasoning>/gi, "")
+    .replace(/^\s*(思考过程|推理过程|分析过程)\s*[:：][\s\S]*?(?=\n{2,}|$)/i, "")
+    .trim();
 }
 
 function isStudentDone(text: string) {
   return /我懂了|明白了|会了|听懂了|原来如此|懂啦/.test(text) && !/不懂|没懂|不会|还是/.test(text);
 }
 
-async function callModel(config: ModelConfig, messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, json = false) {
+async function callModel(config: ModelConfig, messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, lowTemperature = false) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       endpoint: normalizeEndpoint(config.endpoint), apiKey: config.apiKey,
-      model: config.model, messages, temperature: json ? 0.2 : 0.7,
-      ...(json ? { responseFormat: "json" } : {}),
+      model: config.model, messages, temperature: lowTemperature ? 0.2 : 0.7,
     }),
   });
   const raw = await response.text();
@@ -100,7 +112,7 @@ async function callModel(config: ModelConfig, messages: Array<{ role: "system" |
       : `接口返回了非 JSON 内容：${raw.slice(0, 160)}`);
   }
   if (!response.ok) throw new Error(data.error || "模型调用失败");
-  return data.content as string;
+  return stripThinking(data.content ?? "");
 }
 
 function ModelCard({ title, icon, accent, value, onChange }: {
