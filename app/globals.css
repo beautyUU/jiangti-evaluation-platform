@@ -46,6 +46,12 @@ textarea { resize: vertical; }
 .input-source-bar button:hover { background: #e9ecfd; }
 .file-input { display: none; }
 .excel-hint { margin: 0 0 11px; padding: 7px 9px; border-radius: 7px; background: #f8f8fb; color: #9497a7; font-size: 8px; line-height: 1.5; }
+.batch-image-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -3px 0 11px; padding: 9px; border: 1px solid #e5e7f2; border-radius: 9px; background: #fff; }
+.batch-image-bar > div { display: flex; flex-direction: column; gap: 2px; }
+.batch-image-bar b { font-size: 11px; color: #55596b; }
+.batch-image-bar small { font-size: 8px; color: #a0a3b1; line-height: 1.4; }
+.batch-image-bar button { border: 1px solid #d9ddf2; color: #596bc8; background: #f2f4ff; border-radius: 8px; padding: 7px 10px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.batch-image-bar button:disabled { opacity: .45; cursor: not-allowed; }
 .problem-selector { margin-bottom: 11px; }
 .problem-selector select { width: 100%; border: 1px solid #dfe1e9; border-radius: 8px; padding: 9px 30px 9px 10px; background: white; color: #4f5367; font-size: 11px; outline: none; }
 .problem-selector span { color: #4c947d; font-size: 9px; font-weight: 400; }
@@ -53,6 +59,7 @@ textarea { resize: vertical; }
 label { display: flex; flex-direction: column; gap: 7px; color: #626678; font-size: 11px; font-weight: 600; }
 input, textarea { border: 1px solid #e2e3ea; border-radius: 8px; padding: 10px 11px; background: #fbfbfd; color: var(--ink); outline: none; line-height: 1.55; font-size: 12px; transition: .2s; }
 input:focus, textarea:focus { border-color: #8793dd; box-shadow: 0 0 0 3px #6d7ed414; background: white; }
+.serial-box { margin-bottom: 10px; }
 .question-box { position: relative; margin-bottom: 14px; }
 .question-box textarea { font-size: 13px; background: white; }
 .question-box > span { position: absolute; bottom: 8px; right: 9px; font-size: 9px; color: #aaaebb; background: white; padding-left: 5px; }

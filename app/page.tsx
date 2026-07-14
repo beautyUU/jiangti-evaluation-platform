@@ -14,6 +14,7 @@ const MAX_MESSAGES = 20;
 // 老师在奇数轮发言。第 19 条作为兜底收束，确保不会以学生消息截断答案。
 const FINAL_TEACHER_TURN = 19;
 type ProblemInput = {
+  serialNumber: string;
   question: string;
   originalImage: string;
   answer: string;
@@ -51,6 +52,7 @@ type ExperimentSnapshot = {
 };
 
 const excelHeaderAliases: Record<keyof ProblemInput, string[]> = {
+  serialNumber: ["序号", "编号", "题号", "ID", "id", "No", "NO", "no", "序列号"],
   question: ["题目", "题干", "题目文本", "问题"],
   originalImage: ["原图", "图片", "题图", "题目图片", "图片链接", "原图链接", "image", "imageUrl", "imageURL"],
   answer: ["答案", "参考答案", "标准答案"],
@@ -103,6 +105,36 @@ function imageReferenceForModel(value: string) {
   if (!trimmed) return "";
   if (/^data:image\//i.test(trimmed)) return "已上传题目原图，页面可预览；当前模型调用仅传递文字题目与参考信息。";
   return trimmed;
+}
+
+function serialKey(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const numeric = trimmed.match(/\d+/)?.[0];
+  return numeric ? String(Number(numeric)) : trimmed.toLowerCase();
+}
+
+function serialFromFilename(name: string) {
+  const base = name.replace(/\.[^.]+$/, "");
+  return serialKey(base);
+}
+
+function readImageAsDataUrl(file: File) {
+  return new Promise<{ key: string; dataUrl: string; name: string }>((resolve, reject) => {
+    if (!file.type.startsWith("image/")) {
+      reject(new Error(`${file.name} 不是图片文件`));
+      return;
+    }
+    const key = serialFromFilename(file.name);
+    if (!key) {
+      reject(new Error(`${file.name} 文件名中没有可识别的序号`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve({ key, dataUrl: typeof reader.result === "string" ? reader.result : "", name: file.name });
+    reader.onerror = () => reject(new Error(`${file.name} 读取失败`));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function callModel(
@@ -215,6 +247,7 @@ function ScorePanel({ scores, onScore, readOnly = false, openAll = false }: {
 }
 
 export default function Home() {
+  const [serialNumber, setSerialNumber] = useState("1");
   const [question, setQuestion] = useState("小明有 24 颗糖，平均分给 6 个小朋友，每个小朋友分到几颗糖？");
   const [originalImage, setOriginalImage] = useState("");
   const [answer, setAnswer] = useState("");
@@ -246,18 +279,20 @@ export default function Home() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const batchImageInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, running]);
 
   const manualCalc = useMemo(() => calculateScores(scores), [scores]);
   const problemContext = useMemo(() => [
+    serialNumber.trim() && `序号：${serialNumber.trim()}`,
     `题目：${question.trim()}`,
     imageReferenceForModel(originalImage) && `原图：${imageReferenceForModel(originalImage)}`,
     answer.trim() && `参考答案：${answer.trim()}`,
     knowledgePoints.trim() && `知识点：${knowledgePoints.trim()}`,
     solutionAnalysis.trim() && `参考解析：${solutionAnalysis.trim()}`,
     errorAnalysis.trim() && `常见错因分析：${errorAnalysis.trim()}`,
-  ].filter(Boolean).join("\n\n"), [question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis]);
+  ].filter(Boolean).join("\n\n"), [serialNumber, question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis]);
 
   const validate = (config?: ModelConfig) => {
     if (!question.trim()) throw new Error("请先输入题目。");
@@ -265,6 +300,7 @@ export default function Home() {
   };
 
   const problemSetters: Record<keyof ProblemInput, (value: string) => void> = {
+    serialNumber: setSerialNumber,
     question: setQuestion,
     originalImage: setOriginalImage,
     answer: setAnswer,
@@ -284,6 +320,7 @@ export default function Home() {
 
   const loadProblem = (problem: ProblemInput, index: number) => {
     setSelectedProblemIndex(index);
+    setSerialNumber(problem.serialNumber);
     setQuestion(problem.question);
     setOriginalImage(problem.originalImage);
     setAnswer(problem.answer);
@@ -318,12 +355,16 @@ export default function Home() {
       const valueAt = (row: readonly unknown[], index: number) =>
         index < 0 || row[index] === null || row[index] === undefined ? "" : String(row[index]).trim();
       const problems = rows.slice(1).map((row) => ({
+        serialNumber: valueAt(row, fieldIndexes.serialNumber),
         question: valueAt(row, fieldIndexes.question),
         originalImage: valueAt(row, fieldIndexes.originalImage),
         answer: valueAt(row, fieldIndexes.answer),
         knowledgePoints: valueAt(row, fieldIndexes.knowledgePoints),
         solutionAnalysis: valueAt(row, fieldIndexes.solutionAnalysis),
         errorAnalysis: valueAt(row, fieldIndexes.errorAnalysis),
+      })).map((problem, index) => ({
+        ...problem,
+        serialNumber: problem.serialNumber || String(index + 1),
       })).filter((problem) => Object.values(problem).some(Boolean));
       if (!problems.length) throw new Error("表格中没有非空的题目数据。");
       setImportedProblems(problems);
@@ -333,6 +374,47 @@ export default function Home() {
       setError(e instanceof Error ? `Excel 导入失败：${e.message}` : "Excel 导入失败。");
     } finally {
       if (excelInputRef.current) excelInputRef.current.value = "";
+    }
+  };
+
+  const importBatchImages = async (files: FileList) => {
+    setError("");
+    if (!importedProblems.length) {
+      setError("请先上传 Excel 表格，再批量上传图片。图片会按 Excel 的“序号”列匹配。");
+      return;
+    }
+    try {
+      const images = await Promise.all(Array.from(files).map(readImageAsDataUrl));
+      const imageMap = new Map(images.map((image) => [image.key, image]));
+      let matched = 0;
+      const unmatchedProblems: string[] = [];
+      const nextProblems = importedProblems.map((problem, index) => {
+        const key = serialKey(problem.serialNumber || String(index + 1));
+        const image = imageMap.get(key);
+        if (!image) {
+          unmatchedProblems.push(problem.serialNumber || String(index + 1));
+          return problem;
+        }
+        matched += 1;
+        return { ...problem, originalImage: image.dataUrl };
+      });
+      const matchedKeys = new Set(nextProblems.map((problem, index) => serialKey(problem.serialNumber || String(index + 1))));
+      const unmatchedImages = images.filter((image) => !matchedKeys.has(image.key)).map((image) => image.name);
+      setImportedProblems(nextProblems);
+      if (selectedProblemIndex >= 0 && nextProblems[selectedProblemIndex]) {
+        loadProblem(nextProblems[selectedProblemIndex], selectedProblemIndex);
+      }
+      const notes = [
+        `已匹配 ${matched} 张图片。`,
+        unmatchedImages.length ? `未匹配图片：${unmatchedImages.slice(0, 5).join("、")}${unmatchedImages.length > 5 ? " 等" : ""}` : "",
+        unmatchedProblems.length ? `未匹配题目序号：${unmatchedProblems.slice(0, 5).join("、")}${unmatchedProblems.length > 5 ? " 等" : ""}` : "",
+      ].filter(Boolean).join("\n");
+      setImportMessage(notes);
+      setNotice(notes);
+    } catch (e) {
+      setError(e instanceof Error ? `批量图片上传失败：${e.message}` : "批量图片上传失败。");
+    } finally {
+      if (batchImageInputRef.current) batchImageInputRef.current.value = "";
     }
   };
 
@@ -429,6 +511,7 @@ export default function Home() {
     stopRef.current = true; setMessages([]); messagesRef.current = []; setScores(emptyScores());
     setDialogueFinished(false);
     setTags([]); setNotes(""); setAutoEval(null); setError(""); setNotice("");
+    setSerialNumber("1");
     setSessionId(uid()); setCreatedAt(new Date().toISOString());
   };
 
@@ -456,6 +539,7 @@ export default function Home() {
       };
       const payload = {
         problem: {
+          serialNumber,
           question,
           originalImage: imageReferenceForModel(originalImage),
           answer,
@@ -520,7 +604,7 @@ export default function Home() {
 
   const exportState = (exportedAt = new Date().toISOString()): EvaluationExportState => ({
     session: { id: sessionId, createdAt, exportedAt, version: "1.1" },
-    problem: { question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis },
+    problem: { serialNumber, question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis },
     configurations: {
       student: redactedConfig(student),
       teacher: redactedConfig(teacher),
@@ -560,6 +644,7 @@ export default function Home() {
     const rows: string[][] = [["section", "key", "value"]];
     rows.push(
       ["session", "id", state.session.id],
+      ["problem", "serialNumber", serialNumber],
       ["problem", "question", question],
       ["problem", "originalImage", originalImage],
       ["problem", "answer", answer],
@@ -587,7 +672,7 @@ export default function Home() {
       }];
     const workbook = XLSX.utils.book_new();
     const summaryRows: Array<Array<string | number>> = [[
-      "实验序号", "Session ID", "保存时间", "题目", "答案", "知识点", "对话条数",
+      "实验序号", "Session ID", "保存时间", "题目序号", "题目", "答案", "知识点", "对话条数",
       "原图", "对话是否完成", "人工总分", "人工是否通过", "自动总分", "自动是否通过", "错误标签", "人工备注",
     ]];
     const scoreRows: Array<Array<string | number>> = [[
@@ -607,6 +692,7 @@ export default function Home() {
         index + 1,
         state.session.id,
         snapshot.savedAt,
+        state.problem.serialNumber,
         state.problem.question,
         state.problem.answer,
         state.problem.knowledgePoints,
@@ -659,6 +745,7 @@ export default function Home() {
       });
 
       detailRows.push(
+        [index + 1, state.session.id, "题目", "序号", state.problem.serialNumber],
         [index + 1, state.session.id, "题目", "原图", state.problem.originalImage],
         [index + 1, state.session.id, "题目", "解析", state.problem.solutionAnalysis],
         [index + 1, state.session.id, "题目", "错因分析", state.problem.errorAnalysis],
@@ -714,7 +801,13 @@ export default function Home() {
               onChange={(e) => e.target.files?.[0] && importExcel(e.target.files[0])} />
             <button onClick={() => excelInputRef.current?.click()}>↑ 上传 Excel</button>
           </div>
-          <p className="excel-hint">首行列名：题目、原图、答案、知识点、解析、错因分析；允许部分单元格为空。原图列请放图片 URL 或 data URL，暂不解析 Excel 内嵌图片对象。</p>
+          <p className="excel-hint">首行列名：序号、题目、原图、答案、知识点、解析、错因分析；允许部分单元格为空。原图列可放图片 URL；也可以先上传 Excel，再批量上传本地图片按序号匹配。</p>
+          <div className="batch-image-bar">
+            <div><b>批量图片匹配</b><small>按图片文件名中的序号匹配 Excel 行</small></div>
+            <input ref={batchImageInputRef} className="file-input" type="file" accept="image/*" multiple
+              onChange={(e) => e.target.files && importBatchImages(e.target.files)} />
+            <button type="button" onClick={() => batchImageInputRef.current?.click()} disabled={!importedProblems.length}>批量上传图片</button>
+          </div>
           {importedProblems.length > 0 && (
             <label className="problem-selector">已导入题目
               <select value={selectedProblemIndex} onChange={(e) => {
@@ -724,13 +817,16 @@ export default function Home() {
               }}>
                 {importedProblems.map((problem, index) => (
                   <option key={index} value={index}>
-                    {index + 1}. {problem.question || "题目待补充"}
+                    {problem.serialNumber || index + 1}. {problem.question || "题目待补充"}{problem.originalImage ? " · 有图" : ""}
                   </option>
                 ))}
               </select>
               {importMessage && <span>{importMessage}</span>}
             </label>
           )}
+          <label className="serial-box">题目序号
+            <input value={serialNumber} onChange={(e) => updateProblemField("serialNumber", e.target.value)} placeholder="可选，例如：1" />
+          </label>
           <label className="question-box">题目文本
             <textarea value={question} onChange={(e) => updateProblemField("question", e.target.value)} rows={4} placeholder="在这里输入一道小学数学题…" />
             <span>{question.length} 字</span>
