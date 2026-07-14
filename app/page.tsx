@@ -5,7 +5,7 @@ import { readSheet } from "read-excel-file/browser";
 import * as XLSX from "xlsx";
 import {
   calculateScores, defaultJudgePrompt, defaultStudentPrompt, defaultTeacherPrompt,
-  dimensions, emptyScores, errorTags, rubricForPrompt,
+  dimensions, emptyScores, errorTags,
 } from "@/lib/evaluation";
 import type { AutoEvaluation, DialogueMessage, ModelConfig } from "@/lib/types";
 
@@ -15,6 +15,7 @@ const MAX_MESSAGES = 20;
 const FINAL_TEACHER_TURN = 19;
 type ProblemInput = {
   question: string;
+  originalImage: string;
   answer: string;
   knowledgePoints: string;
   solutionAnalysis: string;
@@ -51,6 +52,7 @@ type ExperimentSnapshot = {
 
 const excelHeaderAliases: Record<keyof ProblemInput, string[]> = {
   question: ["题目", "题干", "题目文本", "问题"],
+  originalImage: ["原图", "图片", "题图", "题目图片", "图片链接", "原图链接", "image", "imageUrl", "imageURL"],
   answer: ["答案", "参考答案", "标准答案"],
   knowledgePoints: ["知识点", "考点", "涉及知识点"],
   solutionAnalysis: ["解析", "参考解析", "答案解析", "解题过程", "解法"],
@@ -90,6 +92,17 @@ function stripThinking(raw: string) {
 
 function isStudentDone(text: string) {
   return /我懂了|明白了|会了|听懂了|原来如此|懂啦/.test(text) && !/不懂|没懂|不会|还是/.test(text);
+}
+
+function isPreviewableImage(value: string) {
+  return /^(https?:\/\/|data:image\/|blob:)/i.test(value.trim());
+}
+
+function imageReferenceForModel(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^data:image\//i.test(trimmed)) return "已上传题目原图，页面可预览；当前模型调用仅传递文字题目与参考信息。";
+  return trimmed;
 }
 
 async function callModel(
@@ -203,6 +216,7 @@ function ScorePanel({ scores, onScore, readOnly = false, openAll = false }: {
 
 export default function Home() {
   const [question, setQuestion] = useState("小明有 24 颗糖，平均分给 6 个小朋友，每个小朋友分到几颗糖？");
+  const [originalImage, setOriginalImage] = useState("");
   const [answer, setAnswer] = useState("");
   const [knowledgePoints, setKnowledgePoints] = useState("");
   const [solutionAnalysis, setSolutionAnalysis] = useState("");
@@ -231,17 +245,19 @@ export default function Home() {
   const messagesRef = useRef(messages);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, running]);
 
   const manualCalc = useMemo(() => calculateScores(scores), [scores]);
   const problemContext = useMemo(() => [
     `题目：${question.trim()}`,
+    imageReferenceForModel(originalImage) && `原图：${imageReferenceForModel(originalImage)}`,
     answer.trim() && `参考答案：${answer.trim()}`,
     knowledgePoints.trim() && `知识点：${knowledgePoints.trim()}`,
     solutionAnalysis.trim() && `参考解析：${solutionAnalysis.trim()}`,
     errorAnalysis.trim() && `常见错因分析：${errorAnalysis.trim()}`,
-  ].filter(Boolean).join("\n\n"), [question, answer, knowledgePoints, solutionAnalysis, errorAnalysis]);
+  ].filter(Boolean).join("\n\n"), [question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis]);
 
   const validate = (config?: ModelConfig) => {
     if (!question.trim()) throw new Error("请先输入题目。");
@@ -250,6 +266,7 @@ export default function Home() {
 
   const problemSetters: Record<keyof ProblemInput, (value: string) => void> = {
     question: setQuestion,
+    originalImage: setOriginalImage,
     answer: setAnswer,
     knowledgePoints: setKnowledgePoints,
     solutionAnalysis: setSolutionAnalysis,
@@ -268,6 +285,7 @@ export default function Home() {
   const loadProblem = (problem: ProblemInput, index: number) => {
     setSelectedProblemIndex(index);
     setQuestion(problem.question);
+    setOriginalImage(problem.originalImage);
     setAnswer(problem.answer);
     setKnowledgePoints(problem.knowledgePoints);
     setSolutionAnalysis(problem.solutionAnalysis);
@@ -295,12 +313,13 @@ export default function Home() {
         ]),
       ) as Record<keyof ProblemInput, number>;
       if (Object.values(fieldIndexes).every((index) => index < 0)) {
-        throw new Error("没有识别到题目字段。请使用列名：题目、答案、知识点、解析、错因分析。");
+        throw new Error("没有识别到题目字段。请使用列名：题目、原图、答案、知识点、解析、错因分析。");
       }
       const valueAt = (row: readonly unknown[], index: number) =>
         index < 0 || row[index] === null || row[index] === undefined ? "" : String(row[index]).trim();
       const problems = rows.slice(1).map((row) => ({
         question: valueAt(row, fieldIndexes.question),
+        originalImage: valueAt(row, fieldIndexes.originalImage),
         answer: valueAt(row, fieldIndexes.answer),
         knowledgePoints: valueAt(row, fieldIndexes.knowledgePoints),
         solutionAnalysis: valueAt(row, fieldIndexes.solutionAnalysis),
@@ -315,6 +334,22 @@ export default function Home() {
     } finally {
       if (excelInputRef.current) excelInputRef.current.value = "";
     }
+  };
+
+  const importImageFile = (file: File) => {
+    setError("");
+    if (!file.type.startsWith("image/")) {
+      setError("原图上传失败：请选择图片文件。");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateProblemField("originalImage", typeof reader.result === "string" ? reader.result : "");
+      setNotice("原图已上传并可在页面预览。");
+      if (imageInputRef.current) imageInputRef.current.value = "";
+    };
+    reader.onerror = () => setError("原图上传失败：无法读取这个图片文件。");
+    reader.readAsDataURL(file);
   };
 
   const historyFor = (role: "teacher" | "student", history: DialogueMessage[]) =>
@@ -422,6 +457,7 @@ export default function Home() {
       const payload = {
         problem: {
           question,
+          originalImage: imageReferenceForModel(originalImage),
           answer,
           knowledgePoints,
           solutionAnalysis,
@@ -484,7 +520,7 @@ export default function Home() {
 
   const exportState = (exportedAt = new Date().toISOString()): EvaluationExportState => ({
     session: { id: sessionId, createdAt, exportedAt, version: "1.1" },
-    problem: { question, answer, knowledgePoints, solutionAnalysis, errorAnalysis },
+    problem: { question, originalImage, answer, knowledgePoints, solutionAnalysis, errorAnalysis },
     configurations: {
       student: redactedConfig(student),
       teacher: redactedConfig(teacher),
@@ -525,6 +561,7 @@ export default function Home() {
     rows.push(
       ["session", "id", state.session.id],
       ["problem", "question", question],
+      ["problem", "originalImage", originalImage],
       ["problem", "answer", answer],
       ["problem", "knowledgePoints", knowledgePoints],
       ["problem", "solutionAnalysis", solutionAnalysis],
@@ -551,7 +588,7 @@ export default function Home() {
     const workbook = XLSX.utils.book_new();
     const summaryRows: Array<Array<string | number>> = [[
       "实验序号", "Session ID", "保存时间", "题目", "答案", "知识点", "对话条数",
-      "对话是否完成", "人工总分", "人工是否通过", "自动总分", "自动是否通过", "错误标签", "人工备注",
+      "原图", "对话是否完成", "人工总分", "人工是否通过", "自动总分", "自动是否通过", "错误标签", "人工备注",
     ]];
     const scoreRows: Array<Array<string | number>> = [[
       "实验序号", "Session ID", "评分来源", "一级维度", "一级权重", "一级小计",
@@ -574,6 +611,7 @@ export default function Home() {
         state.problem.answer,
         state.problem.knowledgePoints,
         state.dialogue.messages.length,
+        state.problem.originalImage,
         state.dialogue.completed ? "是" : "否",
         state.manualEvaluation.total,
         state.manualEvaluation.passed ? "是" : "否",
@@ -621,6 +659,7 @@ export default function Home() {
       });
 
       detailRows.push(
+        [index + 1, state.session.id, "题目", "原图", state.problem.originalImage],
         [index + 1, state.session.id, "题目", "解析", state.problem.solutionAnalysis],
         [index + 1, state.session.id, "题目", "错因分析", state.problem.errorAnalysis],
         [index + 1, state.session.id, "配置", "学生模型", JSON.stringify(state.configurations.student)],
@@ -675,7 +714,7 @@ export default function Home() {
               onChange={(e) => e.target.files?.[0] && importExcel(e.target.files[0])} />
             <button onClick={() => excelInputRef.current?.click()}>↑ 上传 Excel</button>
           </div>
-          <p className="excel-hint">首行列名：题目、答案、知识点、解析、错因分析；允许部分单元格为空。</p>
+          <p className="excel-hint">首行列名：题目、原图、答案、知识点、解析、错因分析；允许部分单元格为空。原图列请放图片 URL 或 data URL，暂不解析 Excel 内嵌图片对象。</p>
           {importedProblems.length > 0 && (
             <label className="problem-selector">已导入题目
               <select value={selectedProblemIndex} onChange={(e) => {
@@ -697,6 +736,28 @@ export default function Home() {
             <span>{question.length} 字</span>
           </label>
           <div className="problem-extras">
+            <section className="image-input-card">
+              <div className="image-input-head">
+                <div><b>题目原图</b><small>可选，支持上传图片或填写图片链接</small></div>
+                <input ref={imageInputRef} className="file-input" type="file" accept="image/*"
+                  onChange={(e) => e.target.files?.[0] && importImageFile(e.target.files[0])} />
+                <button type="button" onClick={() => imageInputRef.current?.click()}>上传原图</button>
+              </div>
+              <label>原图地址 / Data URL
+                <input value={originalImage} onChange={(e) => updateProblemField("originalImage", e.target.value)}
+                  placeholder="可选：粘贴图片 URL，或点击上传原图自动生成" />
+              </label>
+              {originalImage.trim() && (
+                isPreviewableImage(originalImage) ? (
+                  <figure className="problem-image-preview">
+                    <img src={originalImage} alt="题目原图预览" />
+                    <figcaption>原图预览</figcaption>
+                  </figure>
+                ) : (
+                  <p className="image-text-preview">已填写原图内容，但不是可直接预览的图片链接。</p>
+                )
+              )}
+            </section>
             <label>参考答案
               <textarea value={answer} onChange={(e) => updateProblemField("answer", e.target.value)} rows={2} placeholder="可选，例如：4 颗" />
             </label>
