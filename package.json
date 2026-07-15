@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "evaluate": "node scripts/run-evaluation.mjs"
   },
   "dependencies": {
     "next": "^16.2.10",
