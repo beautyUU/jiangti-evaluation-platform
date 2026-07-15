@@ -191,7 +191,7 @@ async function callModel(
     for (const line of lines) {
       if (!line.trim()) continue;
       const event = JSON.parse(line) as {
-        type?: "ping" | "result" | "error";
+        type?: "ping" | "chunk" | "result" | "error";
         content?: string;
         error?: string;
         details?: string;
@@ -200,6 +200,7 @@ async function callModel(
         status?: number;
       };
       if (event.type === "ping") continue;
+      if (event.type === "chunk") continue;
       if (event.type === "result") {
         if (!event.content) throw new Error("模型接口响应成功，但没有返回可展示内容。");
         return stripThinking(event.content);

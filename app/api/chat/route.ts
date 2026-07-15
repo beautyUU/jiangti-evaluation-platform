@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
+
+const DEFAULT_MODEL_TIMEOUT_MS = 10 * 60 * 1000;
 
 type ChatBody = {
   endpoint?: string;
@@ -23,6 +26,14 @@ type ChatResult =
     upstreamRaw?: string;
   };
 
+type EmitToken = (token: string) => void;
+
+function modelTimeoutMs() {
+  const raw = Number(process.env.MODEL_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_MODEL_TIMEOUT_MS;
+  return Math.max(30_000, Math.min(raw, 30 * 60 * 1000));
+}
+
 function summarizeRaw(raw: string) {
   return raw.length > 1200 ? `${raw.slice(0, 1200)}...` : raw;
 }
@@ -38,7 +49,129 @@ function stringifyErrorValue(value: unknown) {
   return value ? String(value) : "";
 }
 
-async function requestUpstream(body: ChatBody, endpoint: string): Promise<ChatResult> {
+function parseModelJsonResponse(data: unknown, raw: string, upstreamStatus: number): ChatResult {
+  const content = (data as { choices?: Array<{ message?: { content?: string } }> })
+    ?.choices?.[0]?.message?.content;
+  if (!content) {
+    return {
+      ok: false,
+      status: 502,
+      error: "模型 API 响应中没有 choices[0].message.content。",
+      details: "这通常表示该接入点返回格式不是 OpenAI-compatible chat/completions。",
+      upstreamStatus,
+      upstreamRaw: summarizeRaw(raw),
+    };
+  }
+  return { ok: true, content, usage: (data as { usage?: unknown }).usage ?? null };
+}
+
+async function readJsonUpstream(upstream: Response): Promise<ChatResult> {
+  const raw = await upstream.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      error: `上游 API 返回了非 JSON 内容（HTTP ${upstream.status}）。`,
+      details: "这通常表示 API 地址被网关、登录页、反向代理或平台错误页拦截了。",
+      upstreamStatus: upstream.status,
+      upstreamRaw: summarizeRaw(raw),
+    };
+  }
+
+  if (!upstream.ok) {
+    const record = typeof data === "object" && data ? data as Record<string, unknown> : {};
+    const upstreamError = record.error ?? record.message ?? record.msg ?? record;
+    const message = stringifyErrorValue(upstreamError) || raw;
+    return {
+      ok: false,
+      status: 502,
+      error: `模型 API 调用失败（HTTP ${upstream.status}）：${message}`,
+      details: JSON.stringify(data),
+      upstreamStatus: upstream.status,
+      upstreamRaw: summarizeRaw(raw),
+    };
+  }
+
+  return parseModelJsonResponse(data, raw, upstream.status);
+}
+
+function parseStreamPayload(payload: string) {
+  try {
+    const data = JSON.parse(payload) as {
+      choices?: Array<{
+        delta?: { content?: string };
+        message?: { content?: string };
+      }>;
+      usage?: unknown;
+    };
+    return {
+      token: data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? "",
+      usage: data.usage ?? null,
+    };
+  } catch {
+    return { token: "", usage: null };
+  }
+}
+
+async function readStreamingUpstream(upstream: Response, emitToken?: EmitToken): Promise<ChatResult> {
+  if (!upstream.ok) return readJsonUpstream(upstream);
+  if (!upstream.body) return readJsonUpstream(upstream);
+
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let usage: unknown = null;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const payload = line.startsWith("data:") ? line.slice(5).trim() : line;
+      if (!payload || payload === "[DONE]") continue;
+      const parsed = parseStreamPayload(payload);
+      if (parsed.usage) usage = parsed.usage;
+      if (parsed.token) {
+        content += parsed.token;
+        emitToken?.(parsed.token);
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    const payload = buffer.trim().startsWith("data:") ? buffer.trim().slice(5).trim() : buffer.trim();
+    if (payload && payload !== "[DONE]") {
+      const parsed = parseStreamPayload(payload);
+      if (parsed.usage) usage = parsed.usage;
+      if (parsed.token) {
+        content += parsed.token;
+        emitToken?.(parsed.token);
+      }
+    }
+  }
+
+  if (!content.trim()) {
+    return {
+      ok: false,
+      status: 502,
+      error: "模型流式响应结束，但没有返回可展示内容。",
+      details: "请确认该模型接入点支持 OpenAI-compatible stream: true 响应。",
+      upstreamStatus: upstream.status,
+    };
+  }
+
+  return { ok: true, content, usage };
+}
+
+async function requestUpstream(body: ChatBody, endpoint: string, emitToken?: EmitToken): Promise<ChatResult> {
   try {
     const upstream = await fetch(endpoint, {
       method: "POST",
@@ -51,52 +184,13 @@ async function requestUpstream(body: ChatBody, endpoint: string): Promise<ChatRe
         messages: body.messages,
         temperature: body.temperature ?? 0.7,
         ...(typeof body.maxTokens === "number" ? { max_tokens: body.maxTokens } : {}),
+        ...(body.stream ? { stream: true } : {}),
       }),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(modelTimeoutMs()),
     });
 
-    const raw = await upstream.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return {
-        ok: false,
-        status: 502,
-        error: `上游 API 返回了非 JSON 内容（HTTP ${upstream.status}）。`,
-        details: "这通常表示 API 地址被网关、登录页、反向代理或平台错误页拦截了。",
-        upstreamStatus: upstream.status,
-        upstreamRaw: summarizeRaw(raw),
-      };
-    }
-
-    if (!upstream.ok) {
-      const record = typeof data === "object" && data ? data as Record<string, unknown> : {};
-      const upstreamError = record.error ?? record.message ?? record.msg ?? record;
-      const message = stringifyErrorValue(upstreamError) || raw;
-      return {
-        ok: false,
-        status: 502,
-        error: `模型 API 调用失败（HTTP ${upstream.status}）：${message}`,
-        details: JSON.stringify(data),
-        upstreamStatus: upstream.status,
-        upstreamRaw: summarizeRaw(raw),
-      };
-    }
-
-    const content = (data as { choices?: Array<{ message?: { content?: string } }> })
-      ?.choices?.[0]?.message?.content;
-    if (!content) {
-      return {
-        ok: false,
-        status: 502,
-        error: "模型 API 响应中没有 choices[0].message.content。",
-        details: "这通常表示该接入点返回格式不是 OpenAI-compatible chat/completions。",
-        upstreamStatus: upstream.status,
-        upstreamRaw: summarizeRaw(raw),
-      };
-    }
-    return { ok: true, content, usage: (data as { usage?: unknown }).usage ?? null };
+    if (body.stream) return readStreamingUpstream(upstream, emitToken);
+    return readJsonUpstream(upstream);
   } catch (error) {
     const message = error instanceof Error ? error.message : "未知错误";
     return {
@@ -117,7 +211,9 @@ function streamChat(body: ChatBody, endpoint: string) {
         controller.enqueue(line({ type: "ping", message: "waiting", timestamp: Date.now() }));
       }, 5000);
 
-      requestUpstream(body, endpoint)
+      requestUpstream(body, endpoint, (token) => {
+        controller.enqueue(line({ type: "chunk", content: token }));
+      })
         .then((result) => {
           clearInterval(heartbeat);
           if (result.ok) {

@@ -8,6 +8,7 @@ import * as XLSX from "xlsx";
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_MESSAGES = 20;
 const FINAL_TEACHER_TURN = 19;
+const DEFAULT_MODEL_TIMEOUT_MS = 30 * 60 * 1000;
 
 const dimensions = [
   {
@@ -157,6 +158,7 @@ function stripThinking(raw) {
 
 async function callModel(config, messages, { temperature = 0.7, maxTokens } = {}) {
   if (!config.endpoint || !config.model) throw new Error("模型 endpoint/model 未配置。");
+  const timeoutMs = Number(process.env.MODEL_TIMEOUT_MS);
   const response = await fetch(normalizeEndpoint(config.endpoint), {
     method: "POST",
     headers: {
@@ -169,7 +171,7 @@ async function callModel(config, messages, { temperature = 0.7, maxTokens } = {}
       temperature,
       ...(maxTokens ? { max_tokens: maxTokens } : {}),
     }),
-    signal: AbortSignal.timeout(10 * 60 * 1000),
+    signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_MODEL_TIMEOUT_MS),
   });
   const raw = await response.text();
   let data;
