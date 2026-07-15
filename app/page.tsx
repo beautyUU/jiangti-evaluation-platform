@@ -149,40 +149,70 @@ async function callModel(
     body: JSON.stringify({
       endpoint: normalizeEndpoint(config.endpoint), apiKey: config.apiKey,
       model: config.model, messages, temperature: lowTemperature ? 0.2 : 0.7,
-      maxTokens,
+      maxTokens, stream: true,
     }),
   });
-  const raw = await response.text();
-  let data: { content?: string; error?: string; raw?: string; details?: string; upstreamStatus?: number; upstreamRaw?: string };
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    const looksLikeHtml = /^\s*</.test(raw);
-    const summary = raw.replace(/\s+/g, " ").slice(0, 500);
-    throw new Error(looksLikeHtml
-      ? [
-        "接口返回了网页内容，不是模型 JSON 响应。",
-        `前端请求状态：HTTP ${response.status}`,
-        "如果只在自动打分时出现，通常是 Judge 请求过长或模型响应过慢，被部署平台/网关返回了 HTML 错误页。",
-        `网页摘要：${summary}`,
-      ].join("\n")
-      : `接口返回了非 JSON 内容（HTTP ${response.status}）：${summary}`);
-  }
-  if (!response.ok) {
+  const formatModelError = (data: { error?: string; raw?: string; details?: string; upstreamStatus?: number; upstreamRaw?: string; status?: number }, status: number) => {
     const parts = [
       data.error || "模型调用失败",
-      `前端请求状态：HTTP ${response.status}`,
+      `前端请求状态：HTTP ${status}`,
       data.upstreamStatus ? `模型接口状态：HTTP ${data.upstreamStatus}` : "",
       data.details ? `错误详情：${data.details}` : "",
       data.raw ? `接口返回摘要：${data.raw.slice(0, 300)}` : "",
       data.upstreamRaw ? `模型原始返回：${data.upstreamRaw.slice(0, 300)}` : "",
     ].filter(Boolean);
-    throw new Error(parts.join("\n"));
+    return parts.join("\n");
+  };
+  if (!response.ok) {
+    const rawError = await response.text();
+    let parsedError: { error?: string; raw?: string; details?: string; upstreamStatus?: number; upstreamRaw?: string; status?: number } | null = null;
+    try {
+      parsedError = JSON.parse(rawError);
+    } catch {
+      parsedError = null;
+    }
+    if (parsedError) throw new Error(formatModelError(parsedError, response.status));
+    {
+      const summary = rawError.replace(/\s+/g, " ").slice(0, 500);
+      throw new Error(`接口返回了非 JSON 内容（HTTP ${response.status}）：${summary}`);
+    }
   }
-  if (!data.content) {
-    throw new Error(`模型接口响应成功，但没有返回可展示内容。\n接口返回摘要：${raw.slice(0, 300)}`);
+
+  if (!response.body) throw new Error("模型流式响应为空。");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as {
+        type?: "ping" | "result" | "error";
+        content?: string;
+        error?: string;
+        details?: string;
+        upstreamStatus?: number;
+        upstreamRaw?: string;
+        status?: number;
+      };
+      if (event.type === "ping") continue;
+      if (event.type === "result") {
+        if (!event.content) throw new Error("模型接口响应成功，但没有返回可展示内容。");
+        return stripThinking(event.content);
+      }
+      if (event.type === "error") throw new Error(formatModelError(event, event.status ?? response.status));
+    }
   }
-  return stripThinking(data.content);
+  if (buffer.trim()) {
+    const event = JSON.parse(buffer) as { type?: "result" | "error"; content?: string; error?: string; status?: number };
+    if (event.type === "result" && event.content) return stripThinking(event.content);
+    if (event.type === "error") throw new Error(formatModelError(event, event.status ?? response.status));
+  }
+  throw new Error("模型连接已结束，但没有收到最终结果。");
 }
 
 function ModelCard({ title, icon, accent, value, onChange }: {
