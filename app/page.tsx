@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { readSheet } from "read-excel-file/browser";
 import * as XLSX from "xlsx";
 import {
@@ -813,6 +814,7 @@ export default function Home() {
         <div className="brand"><span className="brand-mark">评</span><div><b>讲题评测平台</b><small>双模型小学数学讲题评测</small></div></div>
         <div className="session-chip"><span /> SESSION <b>{sessionId.slice(0, 8).toUpperCase()}</b></div>
         <div className="header-actions">
+          <Link className="review-link" href="/review">批量复评</Link>
           <button className="ghost" onClick={reset}>↻ 重置</button>
           <button className="ghost" onClick={saveExperiment}>＋ 保存本次实验</button>
           <button className="export" onClick={exportExperimentsExcel}>⇩ 导出全部 Excel{experiments.length ? `（${experiments.length}）` : ""}</button>

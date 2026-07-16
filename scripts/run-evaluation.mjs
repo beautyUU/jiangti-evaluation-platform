@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
-import * as XLSX from "xlsx";
+
+const require = createRequire(import.meta.url);
+const XLSX = require("xlsx");
 
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_MESSAGES = 20;
@@ -304,6 +307,16 @@ function calculateScores(scores) {
   return { subtotals, total: Math.round(total * 10) / 10, completed, passed: completed && total >= 80 };
 }
 
+async function readExistingResults(output) {
+  try {
+    const raw = await fs.readFile(output, "utf8");
+    const data = JSON.parse(raw);
+    return Array.isArray(data.results) ? data.results : [];
+  } catch {
+    return [];
+  }
+}
+
 async function runJudge(problem, dialogue, config) {
   const requiredScoreKeys = dimensions.flatMap((dimension) => dimension.criteria.map((criterion) => criterion.id));
   const payload = {
@@ -371,8 +384,20 @@ async function main() {
     output,
     maxMessages: args.maxMessages,
   };
-  const results = [];
+  const results = await readExistingResults(output);
+  const completedSerials = new Set(
+    results
+      .filter((item) => item && !item.error && item.problem?.serialNumber)
+      .map((item) => String(item.problem.serialNumber)),
+  );
+  if (completedSerials.size) {
+    console.log(`检测到已有 ${completedSerials.size} 道成功结果，将自动跳过。`);
+  }
   for (const [index, problem] of problems.entries()) {
+    if (completedSerials.has(String(problem.serialNumber))) {
+      console.log(`\n[${index + 1}/${problems.length}] 序号 ${problem.serialNumber || index + 1} 已完成，跳过`);
+      continue;
+    }
     console.log(`\n[${index + 1}/${problems.length}] 序号 ${problem.serialNumber || index + 1}`);
     const item = {
       problem,
